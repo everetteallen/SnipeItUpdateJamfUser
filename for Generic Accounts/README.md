@@ -1,5 +1,5 @@
 # Snipe-IT to Jamf Pro & Google Sheets Webhook Integration (Jamf Pro API - Generic Account)
-
+## Generated with Gemini
 This Google Apps Script acts as a webhook receiver for Snipe-IT, automating the update of computer `User and Location` information in Jamf Pro and logging all relevant events to a Google Sheet whenever an asset is checked in or checked out in Snipe-IT.
 
 **This version of the script uses the newer Jamf Pro API and authenticates using a dedicated Jamf Pro user account's username and password to obtain a Bearer token for API interactions.**
