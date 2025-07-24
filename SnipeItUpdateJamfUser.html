@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Snipe-IT to Jamf Pro & Google Sheets Webhook Integration (Jamf Pro API)</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 0 20px;
+            background-color: #f8f9fa;
+        }
+        h1, h2, h3, h4 {
+            color: #2c3e50;
+            margin-top: 1.5em;
+            margin-bottom: 0.8em;
+        }
+        h1 { font-size: 2.2em; border-bottom: 2px solid #eee; padding-bottom: 0.3em; }
+        h2 { font-size: 1.8em; border-bottom: 1px solid #eee; padding-bottom: 0.2em; }
+        h3 { font-size: 1.4em; }
+        h4 { font-size: 1.2em; }
+        pre, code {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            background-color: #eef;
+            padding: 1em;
+            border-radius: 5px;
+            overflow-x: auto;
+            white-space: pre-wrap; /* Allows long lines to wrap */
+            word-wrap: break-word; /* Ensures long words break */
+        }
+        pre {
+            background-color: #f4f4f4;
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin-bottom: 1em;
+        }
+        code {
+            background-color: #e6e6e6;
+            padding: 0.2em 0.4em;
+            border-radius: 3px;
+        }
+        ul {
+            list-style-type: disc;
+            margin-left: 20px;
+        }
+        ol {
+            list-style-type: decimal;
+            margin-left: 20px;
+        }
+        strong {
+            font-weight: bold;
+        }
+        em {
+            font-style: italic;
+        }
+        a {
+            color: #007bff;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .note {
+            background-color: #fff3cd;
+            border-left: 5px solid #ffc107;
+            padding: 1em;
+            margin: 1em 0;
+            border-radius: 4px;
+        }
+        .warning {
+            background-color: #f8d7da;
+            border-left: 5px solid #dc3545;
+            padding: 1em;
+            margin: 1em 0;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Snipe-IT to Jamf Pro & Google Sheets Webhook Integration (Jamf Pro API)</h1>
+
+    <p>This Google Apps Script acts as a webhook receiver for Snipe-IT, automating the update of computer <code>User and Location</code> information in Jamf Pro and logging all relevant events to a Google Sheet whenever an asset is checked in or checked out in Snipe-IT.</p>
+
+    <p><strong>This version of the script uses the newer Jamf Pro API for all Jamf interactions.</strong></p>
+
+    <h2>Features:</h2>
+    <ul>
+        <li>Receives <code>asset.checkedin</code> and <code>asset.checkedout</code> webhooks from Snipe-IT.</li>
+        <li>Authenticates incoming webhooks using a shared secret provided as a <strong>URL query parameter (<code>?secret=YOUR_SECRET_HERE</code>)</strong>. It can also still accept <code>X-Webhook-Secret</code> header if your Snipe-IT instance (or an intermediary proxy) could add it.</li>
+        <li>Validates the source host (<code>Referer</code> or <code>Origin</code> header) to ensure it comes from your Snipe-IT instance.</li>
+        <li>Authenticates with Jamf Pro using API Client credentials (OAuth token flow for the <code>/api/v1/auth/token</code> endpoint).</li>
+        <li>Finds the computer in Jamf Pro by its serial number using the <code>/api/v1/computers-inventory</code> endpoint with a <code>filter</code>.</li>
+        <li>Updates the Jamf Pro computer's "User and Location" fields (<code>username</code>, <code>realName</code>, <code>building</code>, and <code>department</code>) using a <code>PATCH</code> request to the <code>/api/v1/computers-inventory/{id}</code> endpoint.
+            <ul>
+                <li>On <strong>check-out</strong>: Updates with Snipe-IT's assigned user and location.</li>
+                <li>On <strong>check-in</strong>: Clears the Jamf <code>username</code> and <code>realName</code> fields, and sets <code>building</code> and <code>department</code> to the Snipe-IT location (representing its return to that location in inventory).</li>
+            </ul>
+        </li>
+        <li>Logs all webhook events, Jamf API interactions, and any errors to a **specified Google Sheet tab/name**.</li>
+    </ul>
+
+    <h2>Table of Contents</h2>
+    <ul>
+        <li><a href="#prerequisites">Prerequisites</a></li>
+        <li><a href="#setup-instructions">Setup Instructions</a>
+            <ul>
+                <li><a href="#1-google-sheets-setup">1. Google Sheets Setup</a></li>
+                <li><a href="#2-google-apps-script-setup">2. Google Apps Script Setup</a></li>
+                <li><a href="#3-jamf-pro-setup">3. Jamf Pro Setup</a></li>
+                <li><a href="#4-snipe-it-setup">4. Snipe-IT Setup</a></li>
+            </ul>
+        </li>
+        <li><a href="#usage">Usage</a></li>
+        <li><a href="#logging">Logging</a></li>
+        <li><a href="#troubleshooting">Troubleshooting</a></li>
+        <li><a href="#security-considerations">Security Considerations</a></li>
+        <li><a href="#license">License</a></li>
+    </ul>
+
+    <h2 id="prerequisites">Prerequisites</h2>
+    <p>Before you begin, ensure you have:</p>
+    <ul>
+        <li><strong>Google Account:</strong> To host the Google Sheet and Google Apps Script.</li>
+        <li><strong>Snipe-IT Instance:</strong> Running version 8 or later.</li>
+        <li><strong>Jamf Pro Instance:</strong> Access to API roles and clients.</li>
+        <li><strong>Understanding of APIs:</strong> Basic familiarity with REST APIs and JSON.</li>
+    </ul>
+
+    <h2 id="setup-instructions">Setup Instructions</h2>
+    <p>Follow these steps carefully to set up the entire integration.</p>
+
+    <h3 id="1-google-sheets-setup">1. Google Sheets Setup</h3>
+    <p>This will be your logging sheet and host for the Apps Script.</p>
+    <ol>
+        <li><strong>Create a New Google Sheet:</strong>
+            <ul>
+                <li>Go to <a href="https://docs.google.com/spreadsheets/u/0/" target="_blank">Google Sheets</a> and create a new blank spreadsheet.</li>
+                <li>Name it something descriptive, e.g., "Snipe-IT Jamf Integration Log".</li>
+            </ul>
+        </li>
+        <li><strong>Rename Log Sheet Tab:</strong>
+            <ul>
+                <li>By default, a new sheet is named <code>Sheet1</code>. <strong>Rename this tab</strong> to your desired log sheet name (e.g., "Webhook Log"). You'll use this name in your Apps Script properties.</li>
+            </ul>
+        </li>
+        <li><strong>Add Header Row (Optional but Recommended):</strong>
+            <ul>
+                <li>In the first row of your renamed log sheet, add the following headers (or similar, matching the log entries in <code>appendLog</code> function):
+                    <ul>
+                        <li><code>Timestamp</code></li>
+                        <li><code>Status</code> (e.g., 'Success', 'Failed', 'Unauthorized', 'Ignored')</li>
+                        <li><code>Event Type</code> (e.g., 'asset.checkedin', 'asset.checkedout')</li>
+                        <li><code>Serial Number</code></li>
+                        <li><code>Assigned Username</code></li>
+                        <li><code>Assigned Real Name</code></li>
+                        <li><code>Snipe-IT Location Name</code></li>
+                        <li><code>Details/Error Message</code></li>
+                    </ul>
+                </li>
+            </ul>
+        </li>
+    </ol>
+
+    <h3 id="2-google-apps-script-setup">2. Google Apps Script Setup</h3>
+    <p>This is where the webhook receiver logic resides.</p>
+    <ol>
+        <li><strong>Open Script Editor:</strong>
+            <ul>
+                <li>From your newly created Google Sheet, go to <code>Extensions &gt; Apps Script</code>. This will open a new browser tab with the Apps Script editor.</li>
+            </ul>
+        </li>
+        <li><strong>Paste the Code:</strong>
+            <ul>
+                <li>Delete any existing code in <code>Code.gs</code>.</li>
+                <li>Copy the entire content from the `Code.gs` section provided in this solution (from the text block above this HTML content) and paste it into your <code>Code.gs</code> file in the Apps Script editor.</li>
+            </ul>
+        </li>
+        <li><strong>Set Script Properties:</strong>
+            <ul>
+                <li>In the Apps Script editor, go to <code>Project settings</code> (gear icon on the left sidebar).</li>
+                <li>Scroll down to "Script properties" and click <code>Add script property</code>.</li>
+                <li>Add the following properties with their corresponding values (you'll get <code>JAMF_CLIENT_ID</code> and <code>JAMF_CLIENT_SECRET</code> from Jamf Pro setup):
+                    <ul>
+                        <li><code>JAMF_URL</code>: Your Jamf Pro URL (e.g., <code>https://yourinstance.jamfcloud.com</code>)</li>
+                        <li><code>JAMF_CLIENT_ID</code>: The Client ID for your Jamf API Client (from Jamf setup)</li>
+                        <li><code>JAMF_CLIENT_SECRET</code>: The Client Secret for your Jamf API Client (from Jamf setup)</li>
+                        <li><code>WEBHOOK_SECRET</code>: A strong, random secret string (e.g., <code>aR4nD0mS3cr3tStr1nG!@#</code>). This will be used to authenticate the webhook.</li>
+                        <li><code>SNIPEIT_HOST</code>: The full URL of your Snipe-IT instance (e.g., <code>https://your.snipeit.url</code>). <strong>Crucial for host validation.</strong></li>
+                        <li><code>LOG_SHEET_NAME</code>: The exact name of the sheet tab you want to use for logging (e.g., <code>Webhook Log</code>).</li>
+                    </ul>
+                </li>
+                <li>Click <code>Save script properties</code>.</li>
+            </ul>
+        </li>
+        <li><strong>Deploy as Web App:</strong>
+            <ul>
+                <li>In the Apps Script editor, click on <code>Deploy &gt; New deployment</code>.</li>
+                <li>Click the "Select type" cog icon and choose <code>Web app</code>.</li>
+                <li><strong>Deployment configuration:</strong>
+                    <ul>
+                        <li><strong>Description:</strong> "Snipe-IT Webhook Receiver for Jamf and Google Sheets" (or similar).</li>
+                        <li><strong>Execute as:</strong> <code>Me</code> (your Google Account email).</li>
+                        <li><strong>Who has access:</strong> <code>Anyone</code> (this allows Snipe-IT to send webhooks without specific Google authentication).</li>
+                    </ul>
+                </li>
+                <li>Click <code>Deploy</code>.</li>
+                <li><strong>Authorization:</strong> The first time you deploy, you'll be prompted to authorize the script.
+                    <ul>
+                        <li>Click <code>Authorize access</code>.</li>
+                        <li>Select your Google Account.</li>
+                        <li>You'll see a warning "Google hasn't verified this app." This is normal for your own script. Click <code>Advanced</code> and then <code>Go to &lt;Project Name&gt; (unsafe)</code>.</li>
+                        <li>Click <code>Allow</code> to grant the script permissions (e.g., to connect to external services and manage your spreadsheets).</li>
+                    </ul>
+                </li>
+                <li>After authorization, the deployment dialog will reappear. Click <code>Deploy</code> again if necessary.</li>
+                <li><strong>Copy Web App URL:</strong> Once deployed, you will see a "Web app URL". <strong>Copy this URL</strong> as you will need it for Snipe-IT setup. It will look something like <code>https://script.google.com/macros/s/AKfycb.../exec</code>. Keep this URL secure.</li>
+                <li>Click <code>Done</code>.</li>
+            </ul>
+        </li>
+    </ol>
+
+    <h3 id="3-jamf-pro-setup">3. Jamf Pro Setup</h3>
+    <p>You need an API Client with appropriate permissions in Jamf Pro.</p>
+    <ol>
+        <li><strong>Create an API Role:</strong>
+            <ul>
+                <li>Log in to Jamf Pro as an administrator.</li>
+                <li>Navigate to <code>Settings</code> (gear icon) &gt; <code>System</code> &gt; <code>API Roles and Clients</code>.</li>
+                <li>Go to the <code>API Roles</code> tab and click <code>+ New</code>.</li>
+                <li><strong>Name:</strong> <code>Snipe-IT Integration</code> (or similar).</li>
+                <li><strong>Privileges:</strong> Assign the minimum necessary privileges for this integration. For <code>computers-inventory</code> endpoints, you'll typically need:
+                    <ul>
+                        <li><code>Computers</code> (under <code>Jamf Pro API</code>):
+                            <ul>
+                                <li><code>Read Computer Inventory</code></li>
+                                <li><code>Update Computer Inventory</code></li>
+                            </ul>
+                        </li>
+                        <li><code>API Integrations</code> (under <code>Jamf Pro API</code>):
+                            <ul>
+                                <li><code>Create API Integrations</code> (for token generation)</li>
+                                <li><code>Read API Integrations</code> (for token generation)</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </li>
+                <li>Click <code>Save</code>.</li>
+            </ul>
+        </li>
+        <li><strong>Create an API Client:</strong>
+            <ul>
+                <li>While still in <code>Settings &gt; System &gt; API Roles and Clients</code>, go to the <code>API Clients</code> tab and click <code>+ New</code>.</li>
+                <li><strong>Client Name:</strong> <code>Snipe-IT Integration Client</code> (or similar).</li>
+                <li><strong>API Role:</strong> Select the API Role you just created (e.g., <code>Snipe-IT Integration</code>).</li>
+                <li>Ensure <code>Enabled</code> is checked.</li>
+                <li>Click <code>Save</code>.</li>
+                <li><strong>Generate Client Secret:</strong> Jamf will prompt you to generate a client secret. Click <code>Generate client secret</code>.</li>
+                <li><strong>Copy Client ID and Client Secret:</strong> <strong>Immediately copy the <code>Client ID</code> and <code>Client Secret</code></strong>. These are shown only once. Paste them into the <code>JAMF_CLIENT_ID</code> and <code>JAMF_CLIENT_SECRET</code> script properties in your Google Apps Script editor (from Step 2.3).</li>
+                <li>Click <code>Close</code>.</li>
+            </ul>
+        </li>
+    </ol>
+
+    <h3 id="4-snipe-it-setup">4. Snipe-IT Setup</h3>
+    <p>Configure Snipe-IT to send webhooks to your Google Apps Script.</p>
+    <ol>
+        <li><strong>Log in to Snipe-IT as an Administrator.</strong></li>
+        <li><strong>Navigate to Integrations Settings:</strong>
+            <ul>
+                <li>Go to <code>Admin</code> (gear icon) &gt; <code>Settings</code>.</li>
+                <li>Click on the <code>Integrations</code> tab.</li>
+            </ul>
+        </li>
+        <li><strong>Configure General Webhook:</strong>
+            <ul>
+                <li>Ensure <code>Webhooks Enabled</code> is checked.</li>
+                <li><strong>General Webhook Endpoint:</strong> This is where you'll combine your Web App URL and the secret.
+                    <ul>
+                        <li><strong>Take the "Web app URL" you copied from Google Apps Script deployment (Step 2.4).</strong></li>
+                        <li><strong>Append <code>?secret=YOUR_WEBHOOK_SECRET</code> to the end of that URL.</strong></li>
+                        <li><strong>Example:</strong> If your Web App URL is <code>https://script.google.com/macros/s/AKfycb.../exec</code> and your <code>WEBHOOK_SECRET</code> is <code>mySuperSecret</code>, then the URL you enter here will be:
+                            <pre><code>https://script.google.com/macros/s/AKfycb.../exec?secret=mySuperSecret</code></pre>
+                        </li>
+                        <li><strong>Paste this combined URL into the "General Webhook Endpoint" field.</strong></li>
+                    </ul>
+                </li>
+                <li><strong>General Webhook Channel (Optional):</strong> Leave this blank or set as desired; it's generally not used for custom HTTP endpoints unless your receiving system has a specific requirement.</li>
+                <li><strong>General Webhook Botname (Optional):</strong> You can set this to <code>Snipe-Bot</code> or any other name you prefer. This field is for display purposes, typically for chat integrations, and doesn't affect functionality here.</li>
+                <li><strong>General Webhook Secret:</strong> <strong>Leave this field BLANK in Snipe-IT.</strong> The secret is now part of the URL.</li>
+                <li><strong>Test Integration:</strong> Click the <code>Test Integration</code> button.
+                    <ul>
+                        <li>Check your Google Sheet (specifically the named log sheet tab); you should see a new row logged indicating a "Test Webhook" event and success/failure.</li>
+                        <li>If it fails, review your URLs, secrets, and script properties.</li>
+                    </ul>
+                </li>
+                <li>Scroll to the bottom of the page and click <code>Save</code>.</li>
+            </ul>
+        </li>
+    </ol>
+
+    <h2>Usage</h2>
+    <p>Once configured, the integration will work automatically:</p>
+    <ul>
+        <li>Whenever an <strong>Asset is Checked Out</strong> in Snipe-IT:
+            <ul>
+                <li>A webhook is sent to your Google Apps Script.</li>
+                <li>The script processes the payload.</li>
+                <li>It attempts to update the corresponding computer in Jamf Pro with the assigned user's username, real name, and the asset's Snipe-IT location in the <code>User and Location</code> section.</li>
+                <li>A log entry is added to your Google Sheet.</li>
+            </ul>
+        </li>
+        <li>Whenever an <strong>Asset is Checked In</strong> in Snipe-IT:
+            <ul>
+                <li>A webhook is sent to your Google Apps Script.</li>
+                <li>The script processes the payload.</li>
+                <li>It attempts to update the corresponding computer in Jamf Pro, clearing the <code>username</code> and <code>realName</code> fields, and setting <code>building</code> and <code>department</code> fields to the asset's Snipe-IT location (representing its return to that location in inventory).</li>
+                <li>A log entry is added to your Google Sheet.</li>
+            </ul>
+        </li>
+    </ul>
+
+    <h2>Logging</h2>
+    <p>All webhook events and the results of the Jamf Pro update will be logged to the **specified Google Sheet tab** you created. This is invaluable for monitoring and troubleshooting.</p>
+    <p>The log entries will include:</p>
+    <ul>
+        <li>Timestamp</li>
+        <li>Status (Success, Failed, Unauthorized, Ignored)</li>
+        <li>Event Type (asset.checkedout, asset.checkedin, test_webhook, etc.)</li>
+        <li>Serial Number</li>
+        <li>Assigned Username</li>
+        <li>Assigned Real Name</li>
+        <li>Snipe-IT Location Name</li>
+        <li>Details/Error Message</li>
+    </ul>
+
+    <h2>Troubleshooting</h2>
+    <ul>
+        <li><strong>Check Apps Script Executions:</strong> In the Apps Script editor, go to <code>Executions</code> (the clock icon on the left sidebar). This log will show every time your script runs and any <code>console.log</code> messages or errors. This is your primary debugging tool.</li>
+        <li><strong>Verify Script Properties:</strong> Double-check that all <code>JAMF_URL</code>, <code>JAMF_CLIENT_ID</code>, <code>JAMF_CLIENT_SECRET</code>, <code>WEBHOOK_SECRET</code>, <code>SNIPEIT_HOST</code>, and **<code>LOG_SHEET_NAME</code>** properties are correct in <code>Project settings &gt; Script properties</code>.</li>
+        <li><strong>Jamf Pro API Client Permissions:</strong> Ensure the API Role assigned to your Jamf API Client has <code>Read</code> and <code>Update</code> privileges for <code>Computer Inventory</code>.</li>
+        <li><strong>Webhook Secret Mismatch:</strong> The <code>WEBHOOK_SECRET</code> in Apps Script properties **must** exactly match the secret you appended to the URL in Snipe-IT. It's case-sensitive.</li>
+        <li><strong>Host Mismatch:</strong> Ensure <code>SNIPEIT_HOST</code> in Apps Script exactly matches the base URL of your Snipe-IT instance (e.g., <code>https://your.snipeit.url</code>). This check is case-sensitive and verifies the <code>Referer</code> or <code>Origin</code> header.</li>
+        <li><strong>Google Sheet Permissions & Named Sheet:</strong> Ensure the Google Sheet is accessible to the Apps Script (it should be by default if created together) and that the <code>LOG_SHEET_NAME</code> property **exactly matches** the name of your log sheet tab in Google Sheets (case-sensitive). If the named sheet isn't found, the script will attempt to log to the first available sheet and log an error.</li>
+    </ul>
+
+    <h2>Security Considerations</h2>
+    <ul>
+        <li><strong>Webhook Secret in URL:</strong> While convenient, placing the secret in the URL means it might appear in server logs, proxy logs, or browser histories (if manually tested). Use a strong, random, and unique <code>WEBHOOK_SECRET</code>. Do not reuse passwords.</li>
+        <li><strong>IP Whitelisting (Advanced):</strong> For enhanced security, if your Snipe-IT instance has a static outbound IP address, you could restrict incoming connections to your Google Apps Script Web App (if hosted on a server that allows this, which is typically not the case for standard Apps Script deployments) or implement IP checks within the <code>doPost</code> function (more complex).</li>
+        <li><strong>Jamf API Client Scopes:</strong> Grant only the minimum necessary privileges to your Jamf API Client.</li>
+        <li><strong>Data Exposure:</strong> The script logs data to a Google Sheet. Ensure this sheet's sharing settings are appropriate for your organization's data sensitivity.</li>
+    </ul>
+
+    <h2 id="license">License</h2>
+    <p>This script is provided as-is for educational and functional purposes. You are free to use, modify, and distribute it according to your needs. No warranty is implied.</p>
+
+</body>
+</html>
