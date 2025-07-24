@@ -146,7 +146,6 @@ Configure Snipe-IT to send webhooks to your Google Apps Script.
         * **Paste this combined URL into the "General Webhook Endpoint" field.**
     * **General Webhook Channel (Optional):** Leave this blank or set as desired; it's generally not used for custom HTTP endpoints unless your receiving system has a specific requirement.
     * **General Webhook Botname (Optional):** You can set this to `Snipe-Bot` or any other name you prefer. This field is for display purposes, typically for chat integrations, and doesn't affect functionality here.
-    * **General Webhook Secret:** **Leave this field BLANK in Snipe-IT.** The secret is now part of the URL.
     * **Test Integration:** Click the `Test Integration` button.
         * Check your Google Sheet (specifically the named log sheet tab); you should see a new row logged indicating a "Test Webhook" event and success/failure.
         * If it fails, review your URLs, secrets, and script properties.
