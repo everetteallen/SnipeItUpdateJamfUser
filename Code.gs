@@ -8,17 +8,17 @@ function getConfig() {
   const props = PropertiesService.getScriptProperties();
   return {
     jamfUrl: props.getProperty('JAMF_URL'),
-    jamfUsername: props.getProperty('JAMF_USERNAME'), // New: Jamf Account Username
-    jamfPassword: props.getProperty('JAMF_PASSWORD'), // New: Jamf Account Password
+    jamfClientId: props.getProperty('JAMF_CLIENT_ID'), // New: Jamf API Client ID
+    jamfClientSecret: props.getProperty('JAMF_CLIENT_SECRET'), // New: Jamf API Client Secret
     webhookSecret: props.getProperty('WEBHOOK_SECRET'), // The secret configured in Apps Script properties
     snipeitHost: props.getProperty('SNIPEIT_HOST'), // e.g., 'https://your.snipeit.url'
-    snipeitApiKey: props.getProperty('SNIPEIT_API_KEY'), // New: Snipe-IT Personal Access Token
+    snipeitApiKey: props.getProperty('SNIPEIT_API_KEY'), // Snipe-IT Personal Access Token
     logSheetName: props.getProperty('LOG_SHEET_NAME') || 'Webhook Log' // Default to 'Webhook Log' if not set
   };
 }
 
 /**
- * Obtains and caches a Jamf Pro API Bearer Token using Basic Authentication with a Jamf account.
+ * Obtains and caches a Jamf Pro API Bearer Token using OAuth Client Credentials Flow.
  * Tokens expire after 20 minutes by default.
  * @returns {string} The Jamf Pro Bearer Token.
  * @throws {Error} If token retrieval fails.
@@ -30,22 +30,26 @@ function getJamfToken() {
     return cachedToken.token;
   }
 
-  const { jamfUrl, jamfUsername, jamfPassword } = getConfig();
-  if (!jamfUrl || !jamfUsername || !jamfPassword) {
-    throw new Error('Jamf Pro username/password configuration is incomplete. Check script properties.');
+  const { jamfUrl, jamfClientId, jamfClientSecret } = getConfig();
+  if (!jamfUrl || !jamfClientId || !jamfClientSecret) {
+    throw new Error('Jamf Pro Client ID/Secret configuration is incomplete. Check script properties.');
   }
 
   try {
-    // Jamf Pro API token endpoint
-    const tokenUrl = `${jamfUrl}/api/v1/auth/token`;
-    console.log(`Attempting to get new Jamf token from: ${tokenUrl}`);
+    // Jamf Pro OAuth token endpoint
+    const tokenUrl = `${jamfUrl}/api/oauth/token`;
+    console.log(`Attempting to get new Jamf token using OAuth from: ${tokenUrl}`);
+
+    const payload = {
+      grant_type: 'client_credentials',
+      client_id: jamfClientId,
+      client_secret: jamfClientSecret
+    };
 
     const response = UrlFetchApp.fetch(tokenUrl, {
       method: 'post',
-      headers: {
-        Authorization: 'Basic ' + Utilities.base64Encode(jamfUsername + ':' + jamfPassword), // Basic Auth
-        'Content-Type': 'application/json'
-      },
+      contentType: 'application/x-www-form-urlencoded', // OAuth token endpoint typically expects this
+      payload: Object.keys(payload).map(key => encodeURIComponent(key) + '=' + encodeURIComponent(payload[key])).join('&'),
       muteHttpExceptions: true // Allow us to check response code for errors
     });
 
@@ -53,20 +57,20 @@ function getJamfToken() {
     const responseText = response.getContentText();
 
     if (responseCode !== 200) {
-      console.error(`Jamf Token Error: Status ${responseCode}, Response: ${responseText}`);
+      console.error(`Jamf OAuth Token Error: Status ${responseCode}, Response: ${responseText}`);
       throw new Error(`Failed to get Jamf token. Status: ${responseCode}, Details: ${responseText}`);
     }
 
     const json = JSON.parse(responseText);
     cachedToken = {
-      token: json.token,
-      expires: json.expires // Store expiration for caching logic
+      token: json.access_token, // OAuth token is usually 'access_token'
+      expires: new Date(new Date().getTime() + json.expires_in * 1000).toISOString() // Calculate expiration based on expires_in seconds
     };
-    console.log("Successfully obtained new Jamf token. Expires:", cachedToken.expires);
+    console.log("Successfully obtained new Jamf token via OAuth. Expires:", cachedToken.expires);
     return cachedToken.token;
 
   } catch (e) {
-    console.error(`Error getting Jamf token: ${e.message}`);
+    console.error(`Error getting Jamf token via OAuth: ${e.message}`);
     throw e;
   }
 }
@@ -83,7 +87,7 @@ function getJamfToken() {
 */
 function updateJamf(serialNumber, username, realname, locationName) {
   const { jamfUrl } = getConfig();
-  const token = getJamfToken(); // Get a token using the Jamf account credentials
+  const token = getJamfToken(); // Get a token using the Jamf API Role credentials
 
   // 1. Find computer ID by serial number using /api/v1/computers-inventory with filter
   const lookupUrl = `${jamfUrl}/api/v1/computers-inventory?filter=hardware.serialNumber==${serialNumber}&section=USER_AND_LOCATION`;
