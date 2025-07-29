@@ -8,20 +8,21 @@ function getConfig() {
   const props = PropertiesService.getScriptProperties();
   return {
     jamfUrl: props.getProperty('JAMF_URL'),
-    clientId: props.getProperty('JAMF_CLIENT_ID'),
-    clientSecret: props.getProperty('JAMF_CLIENT_SECRET'),
+    jamfUsername: props.getProperty('JAMF_USERNAME'), // New: Jamf Account Username
+    jamfPassword: props.getProperty('JAMF_PASSWORD'), // New: Jamf Account Password
     webhookSecret: props.getProperty('WEBHOOK_SECRET'), // The secret configured in Apps Script properties
     snipeitHost: props.getProperty('SNIPEIT_HOST'), // e.g., 'https://your.snipeit.url'
-    logSheetName: props.getProperty('LOG_SHEET_NAME') || 'Webhook Log' // New: Default to 'Webhook Log' if not set
+    snipeitApiKey: props.getProperty('SNIPEIT_API_KEY'), // New: Snipe-IT Personal Access Token
+    logSheetName: props.getProperty('LOG_SHEET_NAME') || 'Webhook Log' // Default to 'Webhook Log' if not set
   };
 }
 
 /**
- * Obtains and caches a Jamf Pro API Bearer Token using Client Credentials.
+ * Obtains and caches a Jamf Pro API Bearer Token using Basic Authentication with a Jamf account.
  * Tokens expire after 20 minutes by default.
  * @returns {string} The Jamf Pro Bearer Token.
  * @throws {Error} If token retrieval fails.
- */
+*/
 function getJamfToken() {
   // Check if token is cached and still valid (e.g., within 5 minutes of expiration)
   if (cachedToken && cachedToken.token && cachedToken.expires && (new Date().getTime() < new Date(cachedToken.expires).getTime() - (5 * 60 * 1000))) {
@@ -29,9 +30,9 @@ function getJamfToken() {
     return cachedToken.token;
   }
 
-  const { jamfUrl, clientId, clientSecret } = getConfig();
-  if (!jamfUrl || !clientId || !clientSecret) {
-    throw new Error('Jamf Pro configuration is incomplete. Check script properties.');
+  const { jamfUrl, jamfUsername, jamfPassword } = getConfig();
+  if (!jamfUrl || !jamfUsername || !jamfPassword) {
+    throw new Error('Jamf Pro username/password configuration is incomplete. Check script properties.');
   }
 
   try {
@@ -42,7 +43,7 @@ function getJamfToken() {
     const response = UrlFetchApp.fetch(tokenUrl, {
       method: 'post',
       headers: {
-        Authorization: 'Basic ' + Utilities.base64Encode(clientId + ':' + clientSecret),
+        Authorization: 'Basic ' + Utilities.base64Encode(jamfUsername + ':' + jamfPassword), // Basic Auth
         'Content-Type': 'application/json'
       },
       muteHttpExceptions: true // Allow us to check response code for errors
@@ -79,10 +80,10 @@ function getJamfToken() {
  * @param {string} locationName - The location name from Snipe-IT (mapped to Jamf 'building' and 'department').
  * @returns {number} The HTTP response code from the Jamf PATCH request.
  * @throws {Error} If Jamf lookup fails or update fails.
- */
+*/
 function updateJamf(serialNumber, username, realname, locationName) {
   const { jamfUrl } = getConfig();
-  const token = getJamfToken();
+  const token = getJamfToken(); // Get a token using the Jamf account credentials
 
   // 1. Find computer ID by serial number using /api/v1/computers-inventory with filter
   const lookupUrl = `${jamfUrl}/api/v1/computers-inventory?filter=hardware.serialNumber==${serialNumber}&section=USER_AND_LOCATION`;
@@ -93,7 +94,7 @@ function updateJamf(serialNumber, username, realname, locationName) {
     const lookupResp = UrlFetchApp.fetch(lookupUrl, {
       method: 'get',
       headers: {
-        Authorization: 'Bearer ' + token,
+        Authorization: 'Bearer ' + token, // Use Bearer token for API calls
         Accept: 'application/json'
       },
       muteHttpExceptions: true
@@ -138,7 +139,7 @@ function updateJamf(serialNumber, username, realname, locationName) {
       method: 'patch', // Use PATCH for partial updates
       contentType: 'application/json',
       headers: {
-        Authorization: 'Bearer ' + token,
+        Authorization: 'Bearer ' + token, // Use Bearer token for API calls
         Accept: 'application/json'
       },
       payload: JSON.stringify(payload),
@@ -161,15 +162,89 @@ function updateJamf(serialNumber, username, realname, locationName) {
 }
 
 /**
+ * Extracts the hostname from a given URL string.
+ * @param {string} urlString - The URL string.
+ * @returns {string|null} The hostname, or null if parsing fails.
+*/
+function getHostnameFromUrl(urlString) {
+  try {
+    const url = new URL(urlString);
+    return url.hostname;
+  } catch (e) {
+    console.warn(`Failed to parse URL for hostname: ${urlString}, Error: ${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * Fetches the serial number of an asset from Snipe-IT using its asset tag.
+ * @param {string} assetTag - The asset tag of the device in Snipe-IT.
+ * @returns {string|null} The serial number if found, otherwise null.
+*/
+function getAssetSerialNumberFromSnipeIT(assetTag) {
+  const { snipeitHost, snipeitApiKey } = getConfig();
+
+  if (!snipeitHost || !snipeitApiKey) {
+    console.error('Snipe-IT host or API Key is not configured. Cannot fetch serial number.');
+    return null;
+  }
+
+  const searchUrl = `${snipeitHost}/api/v1/hardware?search=${assetTag}`;
+  console.log(`Searching Snipe-IT for asset tag '${assetTag}' at: ${searchUrl}`);
+
+  try {
+    const response = UrlFetchApp.fetch(searchUrl, {
+      method: 'get',
+      headers: {
+        'Authorization': 'Bearer ' + snipeitApiKey,
+        'Accept': 'application/json'
+      },
+      muteHttpExceptions: true
+    });
+
+    const responseCode = response.getResponseCode();
+    const responseText = response.getContentText();
+
+    if (responseCode !== 200) {
+      console.error(`Snipe-IT API Error for asset tag ${assetTag}: Status ${responseCode}, Response: ${responseText}`);
+      return null;
+    }
+
+    const jsonResponse = JSON.parse(responseText);
+
+    if (jsonResponse.rows && jsonResponse.rows.length > 0) {
+      // Iterate through results to find an exact match by asset_tag
+      for (const asset of jsonResponse.rows) {
+        if (asset.asset_tag === assetTag) {
+          console.log(`Found serial number '${asset.serial}' for asset tag '${assetTag}' in Snipe-IT.`);
+          return asset.serial;
+        }
+      }
+      console.warn(`No exact match found for asset tag '${assetTag}' in Snipe-IT results.`);
+      return null;
+    } else {
+      console.warn(`No assets found in Snipe-IT for search term '${assetTag}'.`);
+      return null;
+    }
+
+  } catch (e) {
+    console.error(`Error fetching serial number from Snipe-IT for asset tag ${assetTag}: ${e.message}`);
+    return null;
+  }
+}
+
+
+/**
  * Handles incoming HTTP POST requests from the Snipe-IT webhook.
  * This is the main entry point for the Apps Script Web App.
  * @param {GoogleAppsScript.Events.DoPost} e - The event object containing request parameters.
- * @returns {GoogleAppsScript.Content.TextOutput} A text output response.
- */
+ * @returns {GoogleAppsScript.Content.TextOutput} A text output response with 200 OK status.
+*/
 function doPost(e) {
   const { webhookSecret, snipeitHost } = getConfig();
   const timestamp = new Date().toISOString();
   let logEntry = [timestamp];
+  let responseMessage = "OK: Webhook processed successfully."; // Default success message
 
   try {
     // 1. Validate Secret from Header OR URL Parameter
@@ -188,8 +263,8 @@ function doPost(e) {
       console.warn(`Unauthorized: Secret Mismatch. Expected: ${webhookSecret}, Received Header: ${receivedSecretHeader}, Received Parameter: ${receivedSecretParam}`);
       logEntry.push('Unauthorized', 'Secret Mismatch');
       appendLog(logEntry);
-      return ContentService.createTextOutput('Unauthorized: Secret Mismatch')
-        .setMimeType(ContentService.MimeType.TEXT);
+      responseMessage = 'OK: Unauthorized - Secret Mismatch';
+      return ContentService.createTextOutput(responseMessage).setMimeType(ContentService.MimeType.TEXT);
     }
 
     // 2. Validate Referer/Origin Host (Optional, but good for security)
@@ -198,12 +273,25 @@ function doPost(e) {
 
     // If snipeitHost is configured, enforce it.
     if (snipeitHost) {
-      if (!referer.startsWith(snipeitHost) && !origin.startsWith(snipeitHost)) {
-        console.warn(`Unauthorized: Host Mismatch. Expected: ${snipeitHost}, Referer: ${referer}, Origin: ${origin}`);
-        logEntry.push('Unauthorized', 'Host Mismatch');
+      const expectedHostname = getHostnameFromUrl(snipeitHost);
+      const refererHostname = getHostnameFromUrl(referer);
+      const originHostname = getHostnameFromUrl(origin);
+
+      if (!expectedHostname) {
+        console.error(`Configuration Error: SNIPEIT_HOST '${snipeitHost}' is not a valid URL.`);
+        logEntry.push('Configuration Error', 'Invalid SNIPEIT_HOST URL');
         appendLog(logEntry);
-        return ContentService.createTextOutput('Unauthorized: Host Mismatch')
-          .setMimeType(ContentService.MimeType.TEXT);
+        responseMessage = 'OK: Internal Error - Invalid SNIPEIT_HOST configuration.';
+        return ContentService.createTextOutput(responseMessage).setMimeType(ContentService.MimeType.TEXT);
+      }
+
+      // Check if either referer or origin hostname matches the expected hostname
+      if (refererHostname !== expectedHostname && originHostname !== expectedHostname) {
+        console.warn(`Unauthorized: Host Mismatch. Expected Host: ${expectedHostname}, Referer Host: ${refererHostname}, Origin Host: ${originHostname}`);
+        logEntry.push('Unauthorized', `Host Mismatch. Expected: ${expectedHostname}, Referer: ${refererHostname}, Origin: ${originHostname}`);
+        appendLog(logEntry);
+        responseMessage = 'OK: Unauthorized - Host Mismatch';
+        return ContentService.createTextOutput(responseMessage).setMimeType(ContentService.MimeType.TEXT);
       }
     } else {
       console.log("SNIPEIT_HOST not configured. Skipping host validation.");
@@ -218,63 +306,122 @@ function doPost(e) {
       console.error(`Failed to parse JSON payload: ${parseError.message}, Content: ${e.postData.contents}`);
       logEntry.push('Error', `JSON Parse Error: ${parseError.message}`);
       appendLog(logEntry);
-      return ContentService.createTextOutput('Bad Request: Invalid JSON')
-        .setMimeType(ContentService.MimeType.TEXT);
+      responseMessage = 'OK: Bad Request - Invalid JSON Payload';
+      return ContentService.createTextOutput(responseMessage).setMimeType(ContentService.MimeType.TEXT);
     }
 
-    const event = params.event;
-
-    // 4. Filter for asset check-in/checkout events only
-    if (event !== 'asset.checkedout' && event !== 'asset.checkedin') {
-      console.log(`Ignored event: ${event}. Only asset.checkedout and asset.checkedin are processed.`);
-      logEntry.push('Ignored', `Event: ${event}`);
+    // --- Handle Snipe-IT Test Webhook ---
+    if (params.channel === "#jamfbot" && params.text && params.text.includes("General Webhook integration with Snipe-IT is working!")) {
+      console.log("Received Snipe-IT test webhook. Returning success.");
+      logEntry.push('Test Webhook', 'Success');
       appendLog(logEntry);
-      return ContentService.createTextOutput(`Ignored event: ${event}`)
-        .setMimeType(ContentService.MimeType.TEXT);
+      responseMessage = 'OK: Snipe-IT test webhook received successfully.';
+      return ContentService.createTextOutput(responseMessage).setMimeType(ContentService.MimeType.TEXT);
     }
 
-    const asset = params.asset || {};
-    const serial = asset.serial;
-    const assignedUser = asset.assigned_to || {};
-    const locationObj = asset.location || {};
+    // --- Parse Actual Asset Event Payload ---
+    let eventType = '';
+    let assetTag = ''; // Will store the (ID) from the title, e.g., 18163
+    let parsedUsername = '';
+    let parsedRealname = '';
+    let parsedLocation = '';
 
-    // For check-in, clear user fields in Jamf
-    const username = (event === 'asset.checkedin') ? '' : assignedUser.username || '';
-    const realname = (event === 'asset.checkedin') ? '' : `${assignedUser.first_name || ''} ${assignedUser.last_name || ''}`.trim();
-    const location = locationObj.name || ''; // Snipe-IT Location name
+    // Determine event type from 'text' field
+    if (params.text) {
+      if (params.text.includes("Asset checked out")) {
+        eventType = 'asset.checkedout';
+      } else if (params.text.includes("Asset checked in")) {
+        eventType = 'asset.checkedin';
+      }
+    }
 
-    logEntry.push(event, serial, username, realname, location);
+    // If it's an asset event, parse details from attachments
+    if (eventType && params.attachments && params.attachments.length > 0) {
+      const attachment = params.attachments[0];
 
-    if (!serial) {
-      const msg = 'Missing serial number in webhook payload.';
+      // Extract asset tag from title (e.g., 18163 from "MacBook 28 (18163)...")
+      const titleMatch = attachment.title ? attachment.title.match(/\((\d+)\)/) : null;
+      if (titleMatch && titleMatch[1]) {
+        assetTag = titleMatch[1];
+        console.log(`Extracted asset tag from webhook: ${assetTag}`);
+      } else {
+        const msg = "Could not extract asset tag from attachment title. Cannot proceed with Jamf update.";
+        console.warn(msg);
+        logEntry.push('Error', msg);
+        appendLog(logEntry);
+        responseMessage = `OK: Missing asset tag - ${msg}`;
+        return ContentService.createTextOutput(responseMessage).setMimeType(ContentService.MimeType.TEXT);
+      }
+
+      // Parse user and location from fields
+      if (attachment.fields && attachment.fields.length > 0) {
+        for (const field of attachment.fields) {
+          if (field.title === "To" || field.title === "Administrator") {
+            // Extract name from link format: <URL|Name>
+            const nameMatch = field.value ? field.value.match(/\|([^>]+)>$/) : null;
+            if (nameMatch && nameMatch[1]) {
+              parsedRealname = nameMatch[1];
+              // Derive username (lowercase, no spaces) - This is an assumption based on common naming conventions.
+              parsedUsername = parsedRealname.toLowerCase().replace(/\s/g, '');
+              console.log(`Parsed Real Name: ${parsedRealname}, Derived Username: ${parsedUsername}`);
+            } else {
+              console.warn(`Could not parse user name from field: ${field.value}`);
+            }
+          } else if (field.title === "Location") {
+            parsedLocation = field.value || ''; // Location might be empty
+            console.log(`Parsed Location: ${parsedLocation}`);
+          }
+        }
+      }
+    }
+
+    // 4. Filter for recognized asset events
+    if (eventType !== 'asset.checkedout' && eventType !== 'asset.checkedin') {
+      console.log(`Ignored event: ${eventType}. Only asset.checkedout and asset.checkedin are processed.`);
+      logEntry.push('Ignored', `Event: ${eventType}`);
+      appendLog(logEntry);
+      responseMessage = `OK: Ignored event: ${eventType}`;
+      return ContentService.createTextOutput(responseMessage).setMimeType(ContentService.MimeType.TEXT);
+    }
+
+    // --- Fetch Serial Number from Snipe-IT using Asset Tag ---
+    const actualSerialNumber = getAssetSerialNumberFromSnipeIT(assetTag);
+
+    if (!actualSerialNumber) {
+      const msg = `Could not retrieve serial number from Snipe-IT for asset tag: ${assetTag}. Cannot update Jamf.`;
       console.warn(msg);
       logEntry.push('Error', msg);
       appendLog(logEntry);
-      return ContentService.createTextOutput(`Missing fields: ${msg}`)
-        .setMimeType(ContentService.MimeType.TEXT);
+      responseMessage = `OK: Failed to get serial number from Snipe-IT for asset tag ${assetTag}.`;
+      return ContentService.createTextOutput(responseMessage).setMimeType(ContentService.MimeType.TEXT);
     }
+
+    // Log the parsed data for the actual event including the fetched serial
+    logEntry.push(eventType, assetTag, actualSerialNumber, parsedUsername, parsedRealname, parsedLocation);
 
     // 5. Update Jamf Pro
     try {
-      const resultCode = updateJamf(serial, username, realname, location);
+      // Pass the fetched actualSerialNumber to updateJamf.
+      const resultCode = updateJamf(actualSerialNumber, parsedUsername, parsedRealname, parsedLocation);
       logEntry.push('Success', `Jamf Updated (Status: ${resultCode})`);
       appendLog(logEntry);
-      return ContentService.createTextOutput(`Jamf updated for ${serial}`)
-        .setMimeType(ContentService.MimeType.TEXT);
+      responseMessage = `OK: Jamf updated for serial ${actualSerialNumber}`;
+      return ContentService.createTextOutput(responseMessage).setMimeType(ContentService.MimeType.TEXT);
     } catch (err) {
-      console.error(`Jamf update failed for serial ${serial}: ${err.message}`);
+      console.error(`Jamf update failed for serial ${actualSerialNumber} (asset tag ${assetTag}): ${err.message}`);
       logEntry.push('Failed', `Jamf Error: ${err.message}`);
       appendLog(logEntry);
-      return ContentService.createTextOutput(`Jamf update failed for ${serial}: ${err.message}`)
-        .setMimeType(ContentService.MimeType.TEXT);
+      responseMessage = `OK: Jamf update failed for serial ${actualSerialNumber}: ${err.message}`;
+      return ContentService.createTextOutput(responseMessage).setMimeType(ContentService.MimeType.TEXT);
     }
 
   } catch (globalError) {
+    // Catch any unhandled errors and still return 200 OK
     console.error(`Unhandled error in doPost: ${globalError.message}, Stack: ${globalError.stack}`);
     logEntry.push('FATAL ERROR', `Unhandled: ${globalError.message}`);
     appendLog(logEntry);
-    return ContentService.createTextOutput(`An unhandled error occurred: ${globalError.message}`)
-      .setMimeType(ContentService.MimeType.TEXT);
+    responseMessage = `OK: An unhandled internal error occurred. Please check logs.`;
+    return ContentService.createTextOutput(responseMessage).setMimeType(ContentService.MimeType.TEXT);
   }
 }
 
