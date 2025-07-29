@@ -73,4 +73,102 @@ This Google Apps Script acts as a webhook listener for Snipe-IT, automatically u
 
         * `SNIPEIT_API_KEY`: The Personal Access Token generated from Snipe-IT (see **Snipe-IT Setup** below).
 
-        * `LOG_SHEET_NAME` (Optional): The name of the Google Sheet tab where logs will
+        * `LOG_SHEET_NAME` (Optional): The name of the Google Sheet tab where logs will be written (e.g., `Webhook Log`). If not set, it defaults to 'Webhook Log'.
+
+4.  **Deploy as Web App:**
+
+    * Click **Deploy** > **New deployment**.
+
+    * Click the gear icon next to "Select type" and choose **Web app**.
+
+    * Configure the deployment:
+
+        * **Description:** (Optional) e.g., "Snipe-IT to Jamf Webhook"
+
+        * **Execute as:** `Me` (your Google account)
+
+        * **Who has access:** `Anyone` (This is crucial for the webhook to be publicly accessible. Security is handled by `WEBHOOK_SECRET` and `SNIPEIT_HOST` validation within the script.)
+
+    * Click **Deploy**.
+
+    * **Authorize** the script if prompted.
+
+    * **Copy the "Web app URL"**. This is the URL you will use in Snipe-IT. It will end with `/exec`.
+
+### Snipe-IT Setup
+
+1.  **Generate a Personal Access Token (API Key):**
+
+    * Log in to your Snipe-IT instance as an administrator.
+
+    * Go to **your profile settings** (click your username in the top right, then "Edit Profile" or similar).
+
+    * Find the **"API" or "Personal Access Tokens"** section.
+
+    * Click to **Create New Token**.
+
+    * Give it a descriptive name (e.g., "Google Apps Script Sync").
+
+    * **Permissions:** Ensure this token has at least **read-only access** to **Assets** (or "hardware"). It does not require write permissions for this script.
+
+    * **Copy the generated token.** This is your `SNIPEIT_API_KEY`.
+
+2.  **Configure the Webhook:**
+
+    * In Snipe-IT, navigate to **Admin** > **Webhooks**.
+
+    * Click **Create New Webhook**.
+
+    * **Payload URL:** Paste the **Web app URL** you copied from your Google Apps Script deployment (the one ending with `/exec`).
+
+    * **Secret:** Enter the **exact same `WEBHOOK_SECRET`** you configured in your Google Apps Script properties.
+
+    * **Webhook Events:** Select the events you want to trigger the sync. At a minimum, select:
+
+        * `asset.checkedout`
+
+        * `asset.checkedin`
+
+    * **Optional Headers:** You might want to add `X-Webhook-Secret` and `Referer` headers for additional security, matching your script's validation.
+
+    * **Test Webhook:** Click the **"Test Webhook"** button. It should now pass successfully, as the script is configured to handle this test payload.
+
+    * Click **Save**.
+
+## Usage
+
+Once configured, simply perform asset check-out and check-in actions in Snipe-IT. The webhook will automatically trigger the Google Apps Script, which will then update the corresponding computer record in Jamf Pro.
+
+Monitor the **Execution log** in your Google Apps Script project and the **Webhook Log** Google Sheet for activity and troubleshooting.
+
+## Troubleshooting
+
+* **301/302 Redirect Error in Snipe-IT:** This almost always means the "Payload URL" configured in Snipe-IT is incorrect or redirecting. **Double-check that you copied the exact "Web app URL" ending in `/exec`** from your Google Apps Script deployment.
+
+* **"Event: undefined" in Logs:** This indicates the script couldn't parse the Snipe-IT payload correctly. Ensure Snipe-IT is sending the standard webhook format for asset check-out/check-in events as shown in the examples in the script's comments.
+
+* **"Unauthorized: Secret Mismatch" / "Host Mismatch":**
+
+    * Verify the `WEBHOOK_SECRET` in Snipe-IT exactly matches the one in your Apps Script properties.
+
+    * Ensure the `SNIPEIT_HOST` in your Apps Script properties exactly matches the base URL of your Snipe-IT instance (e.g., `https://your.snipeit.url`).
+
+* **"Could not retrieve serial number from Snipe-IT":**
+
+    * Check that `SNIPEIT_HOST` and `SNIPEIT_API_KEY` are correctly set in your Apps Script properties.
+
+    * Verify the `SNIPEIT_API_KEY` has the necessary **read-only access to Assets** in Snipe-IT.
+
+    * Confirm that the asset tag extracted from the webhook (the number in parentheses in the asset title) actually exists as an asset tag in Snipe-IT.
+
+* **"No Jamf computer found for serial":**
+
+    * Verify that the serial number fetched from Snipe-IT matches a computer's serial number in Jamf Pro.
+
+    * Ensure the Jamf Pro API user has permissions to search for computers.
+
+* **"Jamf update failed":**
+
+    * Check your Jamf Pro API user's permissions. It needs permission to update computer inventory records (specifically the User & Location section).
+
+    * Review the Jamf Pro API error message in the Apps Script logs for more details.

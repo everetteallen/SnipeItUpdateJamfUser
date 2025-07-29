@@ -1,4 +1,5 @@
-#  Snipe-IT to Jamf Pro Sync Webhook
+# Snipe-IT to Jamf Pro & Google Sheets Webhook Integration (Jamf Pro API)
+## Generated with Gemini
 
 This Google Apps Script acts as a webhook listener for Snipe-IT, automatically updating Jamf Pro computer records when assets are checked out or checked in. It's designed to ensure a consistent 200 OK response to Snipe-IT, even if internal processing encounters issues, to prevent redirect errors.
 
